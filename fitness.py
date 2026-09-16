@@ -1,20 +1,21 @@
-"""Domain classes for the Smart Fitness Session Analyzer.
+"""Classes for the Smart Fitness Session Analyzer.
 
-This module defines the classes that represent a participant, a single
-measurement window, and a full training session. It does not run anything
-on its own; main.py is the entry point that uses these classes.
+This file defines Observation, Participant, Session, and RecoverySession,
+plus a few standalone helper functions. main.py is what actually runs
+the program using these.
 """
 
 from data_generator import available_scenarios, generate_fitness_data
 
 
 class Observation:
-    """Represents one measurement window from a fitness session."""
+    """One measurement window from a fitness session (heart rate, skin
+    response, temperature, activity level, signal quality)."""
 
-    # Reasonable physiological/sensor bounds, based on DATA_DESCRIPTION.md
+    # Bounds used to decide if a reading is valid or should be flagged.
     MIN_HEART_RATE = 35
     MAX_HEART_RATE = 205
-    MIN_SIGNAL_QUALITY = 0.5  # you decide what counts as "usable"
+    MIN_SIGNAL_QUALITY = 0.5
 
     def __init__(self, timestamp, heart_rate, skin_response,
                  temperature, activity_level, signal_quality):
@@ -28,8 +29,8 @@ class Observation:
 
     @classmethod
     def from_dict(cls, data):
-        """Alternative constructor: build an Observation from a raw
-        dictionary, like the ones data_generator.py produces."""
+        """Build an Observation from one of the raw dicts data_generator.py
+        produces."""
         return cls(
             timestamp=data.get("timestamp"),
             heart_rate=data.get("heart_rate"),
@@ -40,7 +41,8 @@ class Observation:
         )
 
     def _validate(self):
-        """Return True if this observation is usable, False otherwise."""
+        """Check every field. Returns False as soon as one fails, True if
+        they all pass."""
         if not in_range(self.__heart_rate, self.MIN_HEART_RATE, self.MAX_HEART_RATE):
             return False
 
@@ -96,7 +98,7 @@ class Observation:
 
 
 class Participant:
-    """Represents a participant and their personal reference values."""
+    """A participant and their personal baseline values."""
 
     def __init__(self, participant_id, baseline_heart_rate,
                  baseline_skin_response, baseline_temperature):
@@ -107,7 +109,8 @@ class Participant:
 
     @classmethod
     def from_dict(cls, data):
-        """Build a Participant from the profile dict generate_fitness_data() returns."""
+        """Build a Participant from the profile dict generate_fitness_data()
+        returns."""
         return cls(
             participant_id=data.get("participant_id"),
             baseline_heart_rate=data.get("baseline_heart_rate"),
@@ -136,10 +139,9 @@ class Participant:
 
 
 class Session:
-    """Represents a full training session: a Participant plus a list of
-    Observations. This is the composition relationship the assignment asks
-    for: a Session HAS Observations, it does not inherit from Observation.
-    """
+    """A Participant plus a list of Observations for one training session.
+    A Session HAS Observations (composition); it doesn't inherit from
+    Observation."""
 
     def __init__(self, participant, observations):
         self.__participant = participant
@@ -154,11 +156,11 @@ class Session:
         return self.__observations
 
     def valid_observations(self):
-        """Return only the observations that passed validation."""
+        """Just the observations that passed validation."""
         return [obs for obs in self.__observations if obs.is_valid]
 
     def _values(self, attr_name):
-        """Collect one field's values across all valid observations."""
+        """Pull one field (by name) from every valid observation."""
         valid = self.valid_observations()
         return [getattr(obs, attr_name) for obs in valid]
 
@@ -181,8 +183,8 @@ class Session:
         return max(values)
 
     def compare_to_baseline(self):
-        """Return a dict of average - baseline differences, or None if
-        there are no valid observations to compare."""
+        """How far this session's averages are from the participant's
+        baseline. None if there's nothing valid to compare."""
         avg_heart_rate = self.average("heart_rate")
         if avg_heart_rate is None:
             return None
@@ -194,6 +196,7 @@ class Session:
         }
 
     def classify(self):
+        """Classify based on average activity level."""
         avg_activity = self.average("activity_level")
         if avg_activity is None:
             return "insufficient_data"
@@ -205,20 +208,20 @@ class Session:
 
 
 class RecoverySession(Session):
-    """A Session variant that specifically checks whether heart rate and
-    activity decline toward the end of the window, which is what
-    distinguishes "recovering" from the other classifications.
-    """
+    """Same as Session, but also checks whether heart rate and activity
+    are actually declining toward the end of the session. That's what
+    makes it different from just "moderate activity on average"."""
 
     def classify(self):
         valid = self.valid_observations()
         if not valid:
             return "insufficient_data"
 
+        # split into an early half and a late half, sorted by time
         valid_sorted = sorted(valid, key=lambda obs: obs.timestamp)
         midpoint = len(valid_sorted) // 2
         if midpoint == 0:
-            # too few valid observations to compare a trend
+            # not enough data to compare a trend
             return super().classify()
 
         early, late = valid_sorted[:midpoint], valid_sorted[midpoint:]
@@ -230,25 +233,24 @@ class RecoverySession(Session):
         if late_hr < early_hr and late_activity < early_activity:
             return "recovering"
 
-        # doesn't look like a decline, fall back to the standard rules
+        # no real decline, use the normal rules instead
         return super().classify()
 
 
 def in_range(value, low, high):
-    """Return True if value is not None and low <= value <= high."""
+    """True if value isn't None and falls between low and high."""
     if value is None:
         return False
     return low <= value <= high
 
 
 def build_session(profile_dict, observation_dicts):
-    """Turn raw generator output into domain objects.
+    """Turn one raw (profile, observations) pair into a RecoverySession.
 
-    Always builds a RecoverySession: its classify() override only reports
-    "recovering" when it actually detects a decline in heart rate and
-    activity level across the session, and falls back to the standard
-    Session.classify() rules otherwise. This way the program doesn't need
-    to be told in advance which scenario produced the data.
+    Always returns a RecoverySession rather than a plain Session, since
+    its classify() only reports "recovering" when it actually finds a
+    decline, and otherwise behaves like a normal Session. That way the
+    program doesn't need to know in advance which scenario it's looking at.
     """
     participant = Participant.from_dict(profile_dict)
     observations = [Observation.from_dict(d) for d in observation_dicts]
@@ -256,10 +258,10 @@ def build_session(profile_dict, observation_dicts):
 
 
 def build_all_sessions(seed=42, participant_id="P001"):
-    """Build one Session per available scenario, using the instructor's
-    data generator. Returns a list of Sessions, one per scenario, so
-    main.py, sample_data.py, and tests.py can all share this same logic
-    instead of each repeating the same loop.
+    """Build one session per scenario in data_generator.py.
+
+    Shared by main.py, sample_data.py, and tests.py so none of them have
+    to repeat this same loop.
     """
     sessions = []
     for scenario in available_scenarios():
@@ -273,7 +275,7 @@ def build_all_sessions(seed=42, participant_id="P001"):
 
 
 def count_by_classification(sessions):
-    """Return a dict mapping classification label -> count, across sessions."""
+    """How many sessions fall into each classification."""
     counts = {}
     for session in sessions:
         label = session.classify()
@@ -282,7 +284,7 @@ def count_by_classification(sessions):
 
 
 def format_report(session):
-    """Build the report text for one session, without printing it."""
+    """Build the report text for one session (as a string, not printed)."""
     total = len(session.observations)
     valid = len(session.valid_observations())
 
