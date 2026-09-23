@@ -88,6 +88,3 @@ insufficient_data: 1
   be missed.
 - `insufficient_data` doesn't distinguish "signal was unreliable" from
   "a value was clearly impossible" — both end up the same way.
-- `tests.py` indexes sessions by list position, matching
-  `data_generator.FITNESS_SCENARIOS`'s order; `sample_data.py` keys by
-  scenario name instead, which is more robust.
